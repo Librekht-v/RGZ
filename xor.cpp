@@ -33,3 +33,40 @@ static unsigned char xorGenerateKey() {
     }
     return (rand() % 255) + 1;
 }
+  //exported functions for C interface
+extern "C" {
+
+const char* encrypt_text(const char* text, unsigned char key) {
+    if (!text) return "";
+    g_resultString = xorEncryptDecrypt(string(text), key);
+    return g_resultString.c_str();
+}
+
+const char* decrypt_text(const char* cipher, unsigned char key) {
+    if (!cipher) return "";
+    g_resultString = xorEncryptDecrypt(string(cipher), key);
+    return g_resultString.c_str();
+}
+
+unsigned char* encrypt_data(const unsigned char* data, int dataSize, unsigned char key, int* outSize) {
+    if (!data || dataSize <= 0) {
+        *outSize = 0;
+        return nullptr;
+    }
+    vector<unsigned char> input(data, data + dataSize);
+    g_resultData = xorEncryptDecryptData(input, key);
+    *outSize = g_resultData.size();
+    return g_resultData.data();
+}
+
+unsigned char* decrypt_data(const unsigned char* data, int dataSize, unsigned char key, int* outSize) {
+    if (!data || dataSize <= 0) {
+        *outSize = 0;
+        return nullptr;
+    }
+    vector<unsigned char> input(data, data + dataSize);
+    g_resultData = xorEncryptDecryptData(input, key);
+    *outSize = g_resultData.size();
+    return g_resultData.data();
+}
+
