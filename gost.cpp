@@ -1,4 +1,4 @@
-#include "algorithm_interface.h"
+#include "../algorithm_interface.h"
 #include <string>
 #include <vector>
 #include <cstring>
