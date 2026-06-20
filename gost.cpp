@@ -256,7 +256,49 @@ static unsigned char generate_random_key() {
 // Инициализация обратных S-блоков при старте программы
 static struct AutoInit {
     AutoInit() { init_inv_sboxes(); }
-} s_auto_init;
+} auto_init;
+
+
+extern "C" {
+// Для шифрования текста
+const char* encrypt_text(const char* text, unsigned char key) { //указатель на char строку
+    if (!text) return "";
+    s_resultStr = process_string(string(text), key, true);
+    return s_resultStr.c_str(); // указатель на глобальную строку (стринг в чар)
+}
+
+const char* decrypt_text(const char* cipher, unsigned char key) {
+    if (!cipher) return "";
+    s_resultStr = process_string(string(cipher), key, false);
+    return s_resultStr.c_str();
+}
+// Для шифрования хоть чего
+unsigned char* encrypt_data(const unsigned char* data, int dataSize, unsigned char key, int* outSize) {
+    if (!data || dataSize <= 0) { *outSize = 0; return nullptr; } // тогда возвращаем пустой указатель
+    vector<unsigned char> input(data, data + dataSize); // оот указателя на начало до конца массива
+    s_resultBuf = process_data(input, key, true);
+    *outSize = s_resultBuf.size();
+    return s_resultBuf.data(); //указатель на первый элемент вектора чтобы в Си вернуть сам вектор
+}
+
+unsigned char* decrypt_data(const unsigned char* data, int dataSize, unsigned char key, int* outSize) {
+    if (!data || dataSize <= 0) { *outSize = 0; return nullptr; }
+    vector<unsigned char> input(data, data + dataSize);
+    s_resultBuf = process_data(input, key, false);
+    *outSize = s_resultBuf.size();
+    return s_resultBuf.data();
+}
+
+unsigned char generate_key() { return generate_random_key(); }
+
+const char* get_algorithm_name() {
+    s_resultStr = "ГОСТ 28147-89 (режим простой замены)";
+    return s_resultStr.c_str();
+}
+
+void free_memory(void* ptr) {}
+
+}
 
 
 
