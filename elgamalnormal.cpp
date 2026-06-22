@@ -1,6 +1,4 @@
-#ifndef ELGAMAL_CORE_H
-#define ELGAMAL_CORE_H
-
+#include "../algorithm_interface.h"
 #include <string>
 #include <vector>
 #include <cstdlib>
@@ -45,20 +43,6 @@ static void generateParams(unsigned char key, long long& p, long long& g, long l
     x = (key % (p - 2)) + 1;
     y = modPow(g, x, p);
 }
-
-static unsigned char elgamalGenerateKey() {
-    static bool seeded = false;
-    if (!seeded) {
-        srand(time(nullptr));
-        seeded = true;
-    }
-    return (rand() % 255) + 1;
-}
-
-#ifndef ELGAMAL_STRING_H
-#define ELGAMAL_STRING_H
-
-#include "elgamal_core.h"
 
 static string elgamalEncryptString(const string& text, unsigned char key) {
     long long p, g, y, x;
@@ -113,9 +97,6 @@ static string elgamalDecryptString(const string& cipherText, unsigned char key) 
     return result;
 }
 
-include "../algorithm_interface.h"
-#include "elgamal_string.h"
-
 static vector<unsigned char> elgamalEncryptData(const vector<unsigned char>& data, unsigned char key) {
     long long p, g, y, x;
     generateParams(key, p, g, y, x);
@@ -164,6 +145,15 @@ static vector<unsigned char> elgamalDecryptData(const vector<unsigned char>& dat
         result.push_back((unsigned char)m);
     }
     return result;
+}
+
+static unsigned char elgamalGenerateKey() {
+    static bool seeded = false;
+    if (!seeded) {
+        srand(time(nullptr));
+        seeded = true;
+    }
+    return (rand() % 255) + 1;
 }
 
 extern "C" {
