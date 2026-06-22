@@ -4,17 +4,16 @@
 #include <cstring>
 #include <cstdlib>
 #include <ctime>
-#include <cstdio>
-#include <algorithm>
-
+#include <sstream>
+#include <iomanip>
+#include <cstdint>
+#include <iostream>
 using namespace std;
 
+static string g_resultString; //результат в виде hex-строки
+static vector<unsigned char> g_resultData; //результат в виде массива байт
 
-static string s_resultStr; //результат в виде hex-строки
-static vector<unsigned char> s_resultBuf; //результат в виде массива байт
-
-
-static const unsigned char SBOX[8][16] = {
+static const unsigned char SBox[8][16] = {
     {4, 10, 9, 2, 13, 8, 0, 14, 6, 11, 1, 12, 7, 15, 5, 3},
     {14, 11, 4, 12, 6, 13, 15, 10, 2, 3, 8, 1, 0, 7, 5, 9},
     {5, 8, 1, 13, 10, 3, 4, 2, 14, 15, 12, 7, 6, 0, 9, 11},
@@ -25,286 +24,383 @@ static const unsigned char SBOX[8][16] = {
     {1, 15, 13, 0, 5, 7, 10, 4, 9, 2, 3, 14, 6, 11, 8, 12}
 };
 
-static unsigned char INV_SBOX[8][16];
+static unsigned char InvSBox[8][16];
 
-static void init_inv_sboxes() {
-    static bool is_initialized = false;
-    if (is_initialized) return;
-    for (int i = 0; i < 8; ++i) {
-        for (int j = 0; j < 16; ++j) {
-            INV_SBOX[i][SBOX[i][j]] = j;
+static void initInvSBoxes() { // Инициализация обратных S-блоков при старте программы
+    static bool initialized = false;
+    if (initialized) return;
+    for (int i = 0; i < 8; i++) {
+        for (int j = 0; j < 16; j++) {
+            InvSBox[i][SBox[i][j]] = j;
         }
     }
-    is_initialized = true;
+    initialized = true;
 }
 
 // циклический сдвиг влево на 11 бит
-static unsigned int left_shift_11(unsigned int x) {
-    return (x << 11) | (x >> 21);
+static unsigned int leftRotate11(unsigned int x) {
+    return (x << 11) | (x >> (32 - 11));
 }
 
 // Битовый циклический сдвиг вправо на 11 бит
-static unsigned int right_shift_11(unsigned int x) {
-    return (x >> 11) | (x << 21);
+static unsigned int rightRotate11(unsigned int x) {
+    return (x >> 11) | (x << (32 - 11));
 }
 
 // Раундовая функция зашифрования 
-static unsigned int gost_encrypt_round(unsigned int block, unsigned int key) {
-    unsigned int sum = block + key; // Сложение по модулю 2^32
+static unsigned int gostRound(unsigned int n, unsigned int key) {
+    unsigned int sum = n + key; // Сложение по модулю 2^32
 
     // Побитовая подстановка (S-boxes)
-    unsigned int substituted = 0;
-    for (int i = 0; i < 8; ++i) {
+    unsigned int replaced = 0;
+    for (int i = 0; i < 8; i++) {
         unsigned int nibble = (sum >> (4 * i)) & 0xF; // сдвигаем число вправо на 4*i бит, чтобы нужный полубайт оказался в младших 4 битах. Затем обнуляем все биты, кроме младших 4
-        substituted |= (SBOX[i][nibble] << (4 * i));
+        replaced |= (SBox[i][nibble] << (4 * i));
     }
 
-    return left_shift_11(substituted); // Циклический сдвиг на 11
+    return leftRotate11(replaced); // Циклический сдвиг на 11
 }
 
 // Раундовая функция расшифрования 
-static unsigned int gost_decrypt_round(unsigned int block, unsigned int key) {
-    unsigned int shifted = right_shift_11(block); // Обратный сдвиг
+static unsigned int gostInvRound(unsigned int n, unsigned int key) {
+    unsigned int rotated = rightRotate11(n); // Обратный сдвиг
 
     // Обратная подстановка
-    unsigned int substituted = 0;
-    for (int i = 0; i < 8; ++i) {
-        unsigned int nibble = (shifted >> (4 * i)) & 0xF;
-        substituted |= (INV_SBOX[i][nibble] << (4 * i));
+    unsigned int replaced = 0;
+    for (int i = 0; i < 8; i++) {
+        unsigned int nibble = (rotated >> (4 * i)) & 0xF;
+        replaced |= (InvSBox[i][nibble] << (4 * i));
     }
 
-    return substituted - key; // Вычитание по модулю 2^32
+    return replaced - key; // Вычитание по модулю 2^32
 }
 
 // Развертка 8-байтного ключа в 8 раундовых подключей (по 4 байта)
-static void expand_key(const unsigned char key[8], unsigned int round_keys[8]) {
-    for (int i = 0; i < 8; ++i) {
-        round_keys[i] = 0;
-        for (int j = 0; j < 4; ++j) {
-            round_keys[i] |= (key[(i * 4 + j) % 8] << (8 * j)); //использование этих 8 ключей в 32 раундах (повторяя их)
+static void expandKey(unsigned char key[8], unsigned int roundKeys[8]) {
+    for (int i = 0; i < 8; i++) {
+        roundKeys[i] = 0;
+        for (int j = 0; j < 4; j++) {
+            int byteIndex = (i * 4 + j) % 8;
+            roundKeys[i] |= (key[byteIndex] << (8 * j)); //использование этих 8 ключей в 32 раундах (повторяя их)
         }
     }
 }
 
 // Шифрование одного 8-байтного блока (Сеть Фейстеля, 32 раунда)
-static void encrypt_block(const unsigned char in[8], unsigned char out[8], unsigned int rkeys[8]) {
-    unsigned int n1 = 0, n2 = 0;
-    for (int i = 0; i < 4; ++i) {
-        n1 |= (in[i] << (8 * i)); // Берём 8 байт и разбиваем их на две половинки
-        n2 |= (in[i + 4] << (8 * i));
+static void encryptBlock(const unsigned char input[8], unsigned char output[8], unsigned int roundKeys[8]) {
+    unsigned int left = 0, right = 0;
+    for (int i = 0; i < 4; i++) {
+        left |= (input[i] << (8 * i)); // Берём 8 байт и разбиваем их на две половинки
+        right |= (input[i + 4] << (8 * i));
     }
 
     // Первые 24 раунда: ключи повторяются 3 раза
-    for (int r = 0; r < 24; ++r) {
-        n1 ^= gost_encrypt_round(n2, rkeys[r % 8]); // Ключи повторяются каждые 8 раундов.
-        swap(n1, n2); // Классический обмен половинками в сети Фейстеля
+    for (int round = 0; round < 24; round++) {
+        unsigned int newLeft = right;
+        unsigned int newRight = left ^ gostRound(right, roundKeys[round % 8]); // Ключи повторяются каждые 8 раундов.
+        left = newLeft;
+        right = newRight; // Классический обмен половинками в сети Фейстеля
     }
 
     // ключи в обратном порядке
-    for (int r = 0; r < 8; ++r) {
-        n1 ^= gost_encrypt_round(n2, rkeys[7 - r]); // XOR
-        swap(n1, n2);
+    for (int round = 0; round < 8; round++) {
+        unsigned int newLeft = right;
+        unsigned int newRight = left ^ gostRound(right, roundKeys[7 - round]); // XOR
+        left = newLeft;
+        right = newRight;
     }
 
     // половинки НЕ меняются местами, надо поменять
-    for (int i = 0; i < 4; ++i) {
-        out[i] = (n2 >> (8 * i)) & 0xFF;
-        out[i + 4] = (n1 >> (8 * i)) & 0xFF;
+    for (int i = 0; i < 4; i++) {
+        output[i] = (left >> (8 * i)) & 0xFF;
+        output[i + 4] = (right >> (8 * i)) & 0xFF;
     }
 }
 
 // Расшифрование одного 8-байтного блока
-static void decrypt_block(const unsigned char in[8], unsigned char out[8], unsigned int rkeys[8]) {
-    unsigned int n1 = 0, n2 = 0;
-    for (int i = 0; i < 4; ++i) {
-        n1 |= (in[i] << (8 * i));// количество бит, на которое нужно сдвинуть число вправо.
-        n2 |= (in[i + 4] << (8 * i));
+static void decryptBlock(const unsigned char input[8], unsigned char output[8], unsigned int roundKeys[8]) {
+    unsigned int left = 0, right = 0;
+    for (int i = 0; i < 4; i++) {
+        left |= (input[i] << (8 * i));// количество бит, на которое нужно сдвинуть число вправо.
+        right |= (input[i + 4] << (8 * i));
     }
 
     // В расшифровании раунды идут в обратном порядке, а ключи — в прямом для первых 8
-    for (int r = 0; r < 8; ++r) {
-        n1 ^= gost_decrypt_round(n2, rkeys[r]);
-        swap(n1, n2);
+    unsigned int keySeq[32];
+    int idx = 0;
+    for (int round = 0; round < 24; round++) {
+        keySeq[idx++] = roundKeys[round % 8];
+    }
+    for (int round = 0; round < 8; round++) {
+        keySeq[idx++] = roundKeys[7 - round];
     }
 
-    for (int r = 0; r < 24; ++r) {
-        n1 ^= gost_decrypt_round(n2, rkeys[(23 - r) % 8]);
-        swap(n1, n2);
+    for (int i = 31; i >= 0; i--) {
+        unsigned int newRight = left;
+        unsigned int newLeft = right ^ gostRound(newRight, keySeq[i]);
+        left = newLeft;
+        right = newRight;
     }
 
-    for (int i = 0; i < 4; ++i) {
-        out[i] = (n2 >> (8 * i)) & 0xFF; // 8 единиц
-        out[i + 4] = (n1 >> (8 * i)) & 0xFF;
+    for (int i = 0; i < 4; i++) {
+        output[i] = (left >> (8 * i)) & 0xFF; // 8 единиц
+        output[i + 4] = (right >> (8 * i)) & 0xFF;
     }
 }
 
 // Вспомогательные функции (Паддинг, Hex, Генерация ключа)
 
-static vector<unsigned char> pkcs7_pad(const vector<unsigned char>& data) {
-    size_t pad_len = 8 - (data.size() % 8);
-    vector<unsigned char> res = data;
-    res.insert(res.end(), pad_len, static_cast<unsigned char>(pad_len)); // вставляем в результат N раз N чары 
-    return res;
-}
-
-static vector<unsigned char> pkcs7_unpad(const vector<unsigned char>& data) {
-    if (data.empty()) return {};
-    unsigned char pad_len = data.back(); // длина паддинга
-
-if (pad_len > data.size() || pad_len > 8) return data;
-    return vector<unsigned char>(data.begin(), data.end() - pad_len);
-}
-
-static string bytes_to_hex(const vector<unsigned char>& data) {
-    string res;
-    res.reserve(data.size() * 2);
-    char buf[3];
-    for (unsigned char b : data) {
-        sprintf(buf, "%02x", b); // означает: 2 символа, шестнадцатеричный вид, с ведущим нулём
-        res += buf;
+// ПРОСТОЙ ПАДДИНГ БЕЗ PKCS#7 (чтобы не путался с данными)
+static vector<unsigned char> simplePad(const vector<unsigned char>& data) {
+    vector<unsigned char> padded = data;
+    size_t padLen = 8 - (data.size() % 8);
+    if (padLen != 8) {
+        padded.insert(padded.end(), padLen, 0x00); // вставляем в результат N раз N чары 
     }
-    return res;
+    return padded;
 }
 
-static vector<unsigned char> hex_to_bytes(const string& hex) {
-    vector<unsigned char> res;
-    res.reserve(hex.size() / 2);
-    for (size_t i = 0; i < hex.size(); i += 2) {
-        unsigned int byte;
-        sscanf(hex.c_str() + i, "%02x", &byte); 
-        res.push_back(static_cast<unsigned char>(byte));
+static vector<unsigned char> simpleUnpad(const vector<unsigned char>& data, size_t originalSize) {
+    if (data.size() <= originalSize) {
+        return data;
     }
-    return res;
-}
-
-static void make_key_from_byte(unsigned char key_byte, unsigned char out_key[8]) {
-    for (int i = 0; i < 8; ++i) { // 1 байт ключа в 8 байт
-        out_key[i] = key_byte ^ (i * 0x33);
-    }
-}
-
-
-static string process_string(const string& text, unsigned char key, bool encrypt) {
-    unsigned char raw_key[8];
-    make_key_from_byte(key, raw_key);
-
-    unsigned int rkeys[8];
-    expand_key(raw_key, rkeys);
-
-    vector<unsigned char> data(text.begin(), text.end());
-    if (encrypt) data = pkcs7_pad(data);
-
-    if (!encrypt && data.size() % 8 != 0) return ""; 
-
-    vector<unsigned char> result;
-    result.reserve(data.size());
-
-    for (size_t i = 0; i < data.size(); i += 8) {
-        unsigned char block[8], processed[8];
-        memcpy(block, &data[i], 8); // Копируем 8 байт из вектора data начиная с i в массив block
-
-        if (encrypt) encrypt_block(block, processed, rkeys);  // processed результат шифрования/расшифрования
-        else decrypt_block(block, processed, rkeys);
-
-        result.insert(result.end(), processed, processed + 8); // Вставляем все 8 байт из processed в result
-    }
-
-    if (!encrypt) result = pkcs7_unpad(result);
-
-    return encrypt ? bytes_to_hex(result) : string(result.begin(), result.end()); // или hex или обычная строка
-}
-
-// для обработки байтов, а не строк
-static vector<unsigned char> process_data(const vector<unsigned char>& data, unsigned char key, bool encrypt) {
-    unsigned char raw_key[8];
-    make_key_from_byte(key, raw_key);
-
-    unsigned int rkeys[8];
-    expand_key(raw_key, rkeys);
-
-    vector<unsigned char> work_data = data;
-    if (encrypt) work_data = pkcs7_pad(work_data);
-
-    if (!encrypt && work_data.size() % 8 != 0) return {};
-
-    vector<unsigned char> result;
-    result.reserve(work_data.size());
-
-    for (size_t i = 0; i < work_data.size(); i += 8) {
-        unsigned char block[8], processed[8];
-        memcpy(block, &work_data[i], 8);
-
-        if (encrypt) encrypt_block(block, processed, rkeys);
-        else         decrypt_block(block, processed, rkeys);
-
-        result.insert(result.end(), processed, processed + 8);
-    }
-
-    if (!encrypt) result = pkcs7_unpad(result);
+    vector<unsigned char> result(data.begin(), data.begin() + originalSize);
     return result;
 }
 
-static unsigned char generate_random_key() {
+static string bytesToHex(const vector<unsigned char>& data) {
+    stringstream ss;
+    ss << hex << setfill('0');
+    for (unsigned char byte : data) {
+        ss << setw(2) << (int)byte; // означает: 2 символа, шестнадцатеричный вид, с ведущим нулём
+    }
+    return ss.str();
+}
+
+static vector<unsigned char> hexToBytes(const string& hex) {
+    vector<unsigned char> bytes;
+    for (size_t i = 0; i < hex.length(); i += 2) {
+        string byteString = hex.substr(i, 2);
+        bytes.push_back((unsigned char)stoi(byteString, nullptr, 16)); 
+    }
+    return bytes;
+}
+
+static void expandKeyByte(unsigned char keyByte, unsigned char expandedKey[8]) {
+    for (int i = 0; i < 8; i++) { // 1 байт ключа в 8 байт
+        expandedKey[i] = keyByte ^ (i * 0x33);
+    }
+}
+
+static string gostEncryptString(const string& text, unsigned char key) {
+    unsigned char rawKey[8];
+    expandKeyByte(key, rawKey);
+    
+    unsigned int roundKeys[8];
+    expandKey(rawKey, roundKeys);
+    
+    vector<unsigned char> plain(text.begin(), text.end());
+    vector<unsigned char> padded = simplePad(plain);
+    
+    vector<unsigned char> cipher;
+    for (size_t i = 0; i < padded.size(); i += 8) {
+        unsigned char block[8], encrypted[8];
+        memcpy(block, &padded[i], 8); // Копируем 8 байт из вектора data начиная с i в массив block
+
+        encryptBlock(block, encrypted, roundKeys);  // encrypted результат шифрования/расшифрования
+
+        cipher.insert(cipher.end(), encrypted, encrypted + 8); // Вставляем все 8 байт из encrypted в cipher
+    }
+    
+    return bytesToHex(cipher); // или hex или обычная строка
+}
+
+static string gostDecryptString(const string& cipherHex, unsigned char key) {
+    vector<unsigned char> cipher = hexToBytes(cipherHex);
+    
+    unsigned char rawKey[8];
+    expandKeyByte(key, rawKey);
+    
+    unsigned int roundKeys[8];
+    expandKey(rawKey, roundKeys);
+    
+    if (cipher.size() % 8 != 0) return "";
+    
+    vector<unsigned char> plain;
+    for (size_t i = 0; i < cipher.size(); i += 8) {
+        unsigned char block[8], decrypted[8];
+        memcpy(block, &cipher[i], 8);
+
+        decryptBlock(block, decrypted, roundKeys);
+
+        plain.insert(plain.end(), decrypted, decrypted + 8);
+    }
+    
+    // Удаляем нулевой паддинг
+    while (!plain.empty() && plain.back() == 0x00) {
+        plain.pop_back();
+    }
+    
+    return string(plain.begin(), plain.end());
+}
+
+// для обработки байтов, а не строк
+static vector<unsigned char> gostEncryptData(const vector<unsigned char>& data, unsigned char key) {
+    unsigned char rawKey[8];
+    expandKeyByte(key, rawKey);
+    
+    unsigned int roundKeys[8];
+    expandKey(rawKey, roundKeys);
+    
+    vector<unsigned char> result;
+    
+    // 1. Сохраняем исходный размер (4 байта, little-endian)
+    uint32_t originalSize = (uint32_t)data.size();
+    for (int i = 0; i < 4; ++i) {
+        result.push_back((originalSize >> (i * 8)) & 0xFF);
+    }
+    
+    // 2. Паддинг и шифрование
+    vector<unsigned char> padded = simplePad(data);
+    vector<unsigned char> cipher;
+    
+    for (size_t i = 0; i < padded.size(); i += 8) {
+        unsigned char block[8], encrypted[8];
+        memcpy(block, &padded[i], 8);
+
+        encryptBlock(block, encrypted, roundKeys);
+
+        cipher.insert(cipher.end(), encrypted, encrypted + 8);
+    }
+    
+    // 3. Добавляем зашифрованные данные
+    result.insert(result.end(), cipher.begin(), cipher.end());
+    return result;
+}
+
+static vector<unsigned char> gostDecryptData(const vector<unsigned char>& data, unsigned char key) {
+    // 1. Проверяем минимальный размер
+    if (data.size() < 12) {
+        cerr << "ОШИБКА: размер данных меньше 12 байт" << endl;
+        return {};
+    }
+    
+    // 2. Читаем исходный размер (первые 4 байта)
+    uint32_t originalSize = 0;
+    for (int i = 0; i < 4; ++i) {
+        originalSize |= (uint32_t)data[i] << (i * 8);
+    }
+    
+    cerr << "=== ОТЛАДКА ===" << endl;
+    cerr << "Исходный размер: " << originalSize << " байт" << endl;
+    cerr << "Размер данных: " << data.size() << " байт" << endl;
+    
+    // 3. Проверяем, что размер корректен
+    if (originalSize > data.size() - 4) {
+        cerr << "ОШИБКА: размер из заголовка (" << originalSize 
+             << ") больше данных (" << data.size() - 4 << ")" << endl;
+        return {};
+    }
+    
+    if ((data.size() - 4) % 8 != 0) {
+        cerr << "ОШИБКА: данные не кратны 8" << endl;
+        return {};
+    }
+    
+    unsigned char rawKey[8];
+    expandKeyByte(key, rawKey);
+    
+    unsigned int roundKeys[8];
+    expandKey(rawKey, roundKeys);
+    
+    // 4. Дешифруем данные (начиная с 4-го байта)
+    vector<unsigned char> cipher(data.begin() + 4, data.end());
+    vector<unsigned char> plain;
+    
+    for (size_t i = 0; i < cipher.size(); i += 8) {
+        unsigned char block[8], decrypted[8];
+        memcpy(block, &cipher[i], 8);
+
+        decryptBlock(block, decrypted, roundKeys);
+
+        plain.insert(plain.end(), decrypted, decrypted + 8);
+    }
+    
+    // 5. Убираем нулевой паддинг
+    while (!plain.empty() && plain.back() == 0x00) {
+        plain.pop_back();
+    }
+    
+    // 6. ОБЯЗАТЕЛЬНО обрезаем до исходного размера
+    if (plain.size() > originalSize) {
+        plain.resize(originalSize);
+        cerr << "Обрезано до: " << plain.size() << " байт" << endl;
+    }
+    
+    cerr << "=== КОНЕЦ ОТЛАДКИ ===" << endl;
+    return plain;
+}
+
+static unsigned char gostGenerateKey() {
     static bool seeded = false;
     if (!seeded) {
-        srand(static_cast<unsigned int>(time(nullptr)));
+        srand(time(nullptr));
         seeded = true;
     }
     return (rand() % 255) + 1; // как раз 256 различных 1-байтовых
 }
 
 // Инициализация обратных S-блоков при старте программы
-static struct AutoInit {
-    AutoInit() { init_inv_sboxes(); }
-} auto_init;
-
+static struct Init {
+    Init() {
+        initInvSBoxes();
+    }
+} init;
 
 extern "C" {
 // Для шифрования текста
 const char* encrypt_text(const char* text, unsigned char key) { //указатель на char строку
     if (!text) return "";
-    s_resultStr = process_string(string(text), key, true);
-    return s_resultStr.c_str(); // указатель на глобальную строку (стринг в чар)
+    g_resultString = gostEncryptString(string(text), key);
+    return g_resultString.c_str(); // указатель на глобальную строку (стринг в чар)
 }
 
 const char* decrypt_text(const char* cipher, unsigned char key) {
     if (!cipher) return "";
-    s_resultStr = process_string(string(cipher), key, false);
-    return s_resultStr.c_str();
+    g_resultString = gostDecryptString(string(cipher), key);
+    return g_resultString.c_str();
 }
+
 // Для шифрования хоть чего
 unsigned char* encrypt_data(const unsigned char* data, int dataSize, unsigned char key, int* outSize) {
     if (!data || dataSize <= 0) { *outSize = 0; return nullptr; } // тогда возвращаем пустой указатель
-    vector<unsigned char> input(data, data + dataSize); // оот указателя на начало до конца массива
-    s_resultBuf = process_data(input, key, true);
-    *outSize = s_resultBuf.size();
-    return s_resultBuf.data(); //указатель на первый элемент вектора чтобы в Си вернуть сам вектор
+    vector<unsigned char> input(data, data + dataSize); // от указателя на начало до конца массива
+    g_resultData = gostEncryptData(input, key);
+    *outSize = g_resultData.size();
+    return g_resultData.data(); //указатель на первый элемент вектора чтобы в Си вернуть сам вектор
 }
 
 unsigned char* decrypt_data(const unsigned char* data, int dataSize, unsigned char key, int* outSize) {
     if (!data || dataSize <= 0) { *outSize = 0; return nullptr; }
     vector<unsigned char> input(data, data + dataSize);
-    s_resultBuf = process_data(input, key, false);
-    *outSize = s_resultBuf.size();
-    return s_resultBuf.data();
+    g_resultData = gostDecryptData(input, key);
+    *outSize = g_resultData.size();
+    
+    if (g_resultData.empty()) {
+        *outSize = 0;
+        return nullptr;
+    }
+    
+    return g_resultData.data();
 }
 
-unsigned char generate_key() { return generate_random_key(); }
+unsigned char generate_key() { return gostGenerateKey(); }
 
 const char* get_algorithm_name() {
-    s_resultStr = "ГОСТ 28147-89 (режим простой замены)";
-    return s_resultStr.c_str();
+    g_resultString = "ГОСТ 28147-89 (режим простой замены)";
+    return g_resultString.c_str();
 }
 
 void free_memory(void* ptr) {}
 
 }
-
-
-
-
-
-
-
-
-
